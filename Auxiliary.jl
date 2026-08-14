@@ -81,17 +81,103 @@ function _check_dim(
 end
 
 function _change_ring(f::Union{MPolyRingElem, PolyRingElem}, i::NumFieldHom)
-    @req domain(i) == base_ring(f) "embedding and base ring of f do not have same domain"
-    @req codomain(i) == QQBar "embedding should be into QQBar"
-    if typeof(f) <: PolyRingElem
-      R,var = polynomial_ring(QQBar, symbols(parent(f))[1])
-      return sum([i(c) * var^(n-1) for (n,c) in enumerate(Hecke.coefficients(f))], init = zero(R))
+  @req domain(i) == base_ring(f) "embedding and base ring of f do not have same domain"
+  @req codomain(i) == QQBar "embedding should be into QQBar"
+  if typeof(f) <: PolyRingElem
+    R,var = polynomial_ring(QQBar, symbols(parent(f))[1])
+    return sum([i(c) * var^(n-1) for (n,c) in enumerate(Hecke.coefficients(f))], init = zero(R))
+  end
+  Rm,gen = polynomial_ring(QQBar, symbols(parent(f)))
+  return sum(
+    [i(c) * prod(s^i for (i,s) in zip(v,gen)) for (c,v) in zip(Hecke.coefficients(f), exponent_vectors(f))],
+    init = zero(Rm)
+  )
+end
+
+function adjoin(K::AbsSimpleNumField, iota::NumFieldHom, els::Vector{QQBarFieldElem})
+  #iota is an embedding of K into QQBar 
+  @assert domain(iota) == K && codomain(iota) == QQBar "domain and codomain of morph don't check out"
+  #requires K to be simple 
+  b = gen(K)
+  j = hom(K,K,b)
+  L = K
+  i = iota
+  preimages = Vector{NumFieldElem}()
+  for alpha in els
+    g = minpoly(alpha)
+
+    for c in 1:30
+
+      theta = i(b) + c * alpha
+      h = minpoly(theta)
+      Lext,t = number_field(h, :a)
+      LextY,Y = polynomial_ring(Lext)
+
+      f = change_base_ring(Lext,minpoly(gen(L)))
+      fac = gcd(f(t - c*Y), change_base_ring(Lext,g))
+
+      if isone(degree(fac))
+        preim = -coeff(fac,0)//coeff(fac,1)
+        Lgen = t - c * preim #Lgen is the generator of L in Lext
+
+        #construct embedding of K into Lext
+        j = j * hom(L,Lext,Lgen)
+
+        preimages = [sum(coeff(x,k) * Lgen^k for k in (0:degree(L)-1))  for x in preimages]
+        push!(preimages, preim)
+        L = Lext
+        b = gen(Lext)
+        i = hom(Lext,QQBar,theta)
+        break
+      end
+
+      c == 30 && error("stupid error, enlarge c")
     end
-    Rm,gen = polynomial_ring(QQBar, symbols(parent(f)))
-    return sum(
-      [i(c) * prod(s^i for (i,s) in zip(v,gen)) for (c,v) in zip(Hecke.coefficients(f), exponent_vectors(f))],
-      init = zero(Rm)
-    )
+  end
+  #L is the field K(els)
+  #i is embedding of L into QQBar
+  #j is the embedding from K to L 
+  #preimages are the elements in els but as elements in K. 
+  return L, i, j, preimages
+
+end
+
+function find_preim(K::NumField, iota::NumFieldHom, theta::QQBarFieldElem; prec::Int=256)
+  #takes number field K with embedding K -> QQBar and 
+  #element of QQBar which has a preimage under this embedding 
+  #and returns this element as an element of K.
+  if is_rational(theta)
+    g = minpoly(theta)
+    return -coeff(g,0) // coeff(g,1)
+  end
+  CC = AcbField(prec)
+  alpha = gen(K)
+  alpha_hat = CC(iota(alpha))
+
+  n = degree(K)
+  M = zero_matrix(integer_ring(), n + 1, n + 3)
+  
+  C = BigFloat(2)^(prec - 10)
+
+  for i in (1:n)
+    M[i,i] = 1
+    M[i, n + 2] = round(ZZRingElem, C * BigFloat(real(alpha_hat^(i - 1))))
+    M[i, n + 3] = round(ZZRingElem, C * BigFloat(imag(alpha_hat^(i - 1))))
+  end
+  M[n + 1, n + 1] = 1
+  M[n + 1, n + 2] = round(ZZRingElem, C * BigFloat(real(-CC(theta))))
+  M[n + 1, n + 3] = round(ZZRingElem, C * BigFloat(imag(-CC(theta))))
+
+  redM = lll(M)
+
+  for c in eachrow(redM)
+    c[n + 1] == 0 && continue
+    candidate = sum(c[k] * alpha^(k-1) for k in 1:n) // c[n + 1]
+    iota(candidate) == theta && return candidate
+  end
+
+  return nothing
+
 end
 
 function embed_number_field(K::Union{NumField,QQField}, v::InfPlc)
@@ -102,12 +188,70 @@ function embed_number_field(K::Union{NumField,QQField}, v::InfPlc)
     _,t = polynomial_ring(rational_field())
     F,gen = embedded_number_field([minpoly(s) for s in Hecke.gens(K)],[ComplexF64(iota(s)) for s in Hecke.gens(K)])
     if length(gen) == 1
-      f = hom(K,F,gen[1])
+        f = hom(K,F,gen[1])
     else 
       f = hom(K,F,gen)
     end
     return F,f
 end
+
+function map_function_field_coeffs(f::AbstractAlgebra.Generic.FunctionFieldElem, emb::S, F::AbstractAlgebra.Generic.AbsSimpleFunctionField) where S 
+    #F is the same function field as parent(f) except its constant field is an 
+    #extension of the constant field of parent(f)
+    #i is some map between the constant fields (so this could also be a retraction 
+    #of an embedding into QBar) 
+    #returns f as an element of F
+    x,y = F(gen(base_ring(F))), gen(F)
+    num = numerator(f)
+    denom = denominator(f)
+
+    return sum([
+    sum([emb(a) * x^(j-1) for (j,a) in enumerate(coefficients(b))], init=zero(x)) * y^(i-1)
+    for (i,b) in enumerate(coefficients(num))], init=zero(y)
+    ) // sum([emb(a) * x^(j-1) for (j,a) in enumerate(coefficients(denom))], init=zero(x))
+
+end
+
+function homogenize(g::AbstractAlgebra.Generic.FunctionFieldElem)
+  #input: element from a function field
+  #output: (num, denom) with num and denom being homogeneous of the same degree
+  #the element num/denom is a function in projective coordinates 
+  R,(X,Y,Z) = polynomial_ring(constant_field(parent(g)), [:X,:Y,:Z])
+
+  g_XY = sum([coef(X) * Y^(i-1) for (i,coef) in enumerate(coefficients(numerator(g)))], init=zero(R))
+  g_H = sum([Z^(total_degree(g_XY) - total_degree(f)) * f for f in terms(g_XY)], init = zero(R))
+  d_H = sum([Z^(degree(denominator(g)) - j) * X^j * coeff(denominator(g),j) for j in (0:degree(denominator(g)))], init = zero(R))
+  n = max(total_degree(d_H), total_degree(g_H))
+  
+  g_H *= Z^(n - total_degree(g_H))
+  d_H *= Z^(n - total_degree(d_H))
+
+  return (R(g_H),R(d_H))
+
+end
+
+function _evaluate(p::Hecke.GenOrdIdl)
+  M = basis_matrix(p)
+  O = order(p)
+  a = -M[1,1](0)
+  M[1,1] = zero(QQBar)
+  v = kernel(transpose(M))
+  ev_vec = inv(v[1]) * v
+    
+    function ev_p(f::AbstractAlgebra.Generic.FunctionFieldElem)
+      num = nothing
+      denom = one(base_ring(O))
+      try 
+        num = O(f)
+      catch 
+        denom = denominator(f * O)
+        num = O(denom * f)
+      end
+      return inv(denom(a)) * sum(alpha(a) * ev for (alpha,ev) in zip(coordinates(num),ev_vec))
+    end
+    return ev_p
+end
+
 
 
 """

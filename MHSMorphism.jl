@@ -181,8 +181,8 @@ function induced_morphism(
     if imP in HS2.singular_points_in_E
       for p in HS2.E_pts_places_corr[(P[1], P[2])]
         ev = evaluate(p)
-        if all(ev * phi(gi) for gi in basis(p))
-          
+        if all(ev * phi(gi) == zero(QQBar) for gi in basis(p))
+
         end
       end
     end
@@ -190,14 +190,13 @@ function induced_morphism(
     push!(E_permutation, (i,j))
   end
 
-
   return phi
 
 end
     
 function cohom_pullback(phi::MixedHodgeStructureMorphism)
 
-  #preperation on the domain's end (mainly converting everything)
+  #preperation on the codomain's end (mainly converting everything)
   #to the larger function field
   F2 = phi.function_field2
   dummy_hs = deepcopy(phi.codomain)
@@ -214,7 +213,7 @@ function cohom_pullback(phi::MixedHodgeStructureMorphism)
 
   red = reduction(dummy_hs)
 
-  #preperation on the codomain's end
+  #preperation on the domain's end
   F1 = phi.function_field1
   emb = phi.k1_to_K
   (x,_) = phi.gens1

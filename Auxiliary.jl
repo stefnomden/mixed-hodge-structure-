@@ -206,9 +206,9 @@ function map_function_field_coeffs(f::AbstractAlgebra.Generic.FunctionFieldElem,
     denom = denominator(f)
 
     return sum([
-    sum([emb(a) * x^(j-1) for (j,a) in enumerate(coefficients(b))], init=zero(x)) * y^(i-1)
-    for (i,b) in enumerate(coefficients(num))], init=zero(y)
-    ) // sum([emb(a) * x^(j-1) for (j,a) in enumerate(coefficients(denom))], init=zero(x))
+    sum([emb(a) * x^(j-1) for (j,a) in enumerate(Hecke.coefficients(b))], init=zero(x)) * y^(i-1)
+    for (i,b) in enumerate(Hecke.coefficients(num))], init=zero(y)
+    ) // sum([emb(a) * x^(j-1) for (j,a) in enumerate(Hecke.coefficients(denom))], init=zero(x))
 
 end
 
@@ -218,8 +218,8 @@ function homogenize(g::AbstractAlgebra.Generic.FunctionFieldElem)
   #the element num/denom is a function in projective coordinates 
   R,(X,Y,Z) = polynomial_ring(constant_field(parent(g)), [:X,:Y,:Z])
 
-  g_XY = sum([coef(X) * Y^(i-1) for (i,coef) in enumerate(coefficients(numerator(g)))], init=zero(R))
-  g_H = sum([Z^(total_degree(g_XY) - total_degree(f)) * f for f in terms(g_XY)], init = zero(R))
+  g_XY = sum([coef(X) * Y^(i-1) for (i,coef) in enumerate(Hecke.coefficients(numerator(g)))], init=zero(R))
+  g_H = sum([Z^(total_degree(g_XY) - total_degree(f)) * f for f in Hecke.terms(g_XY)], init = zero(R))
   d_H = sum([Z^(degree(denominator(g)) - j) * X^j * coeff(denominator(g),j) for j in (0:degree(denominator(g)))], init = zero(R))
   n = max(total_degree(d_H), total_degree(g_H))
   
@@ -233,20 +233,26 @@ end
 function _evaluate(p::Hecke.GenOrdIdl)
   M = basis_matrix(p)
   O = order(p)
+  println(O)
   a = -M[1,1](0)
   M[1,1] = zero(QQBar)
   v = kernel(transpose(M))
   ev_vec = inv(v[1]) * v
     
     function ev_p(f::AbstractAlgebra.Generic.FunctionFieldElem)
+      if iszero(f)
+        return zero(QQBar)
+      end
       num = nothing
       denom = one(base_ring(O))
+      println("f=",iszero(f))
       try 
         num = O(f)
       catch 
         denom = denominator(f * O)
         num = O(denom * f)
       end
+      println(f)
       return inv(denom(a)) * sum(alpha(a) * ev for (alpha,ev) in zip(coordinates(num),ev_vec))
     end
     return ev_p

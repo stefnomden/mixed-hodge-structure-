@@ -28,6 +28,7 @@ mutable struct MixedHodgeStructure
 
   zero_res_basis::Vector{FunFldDiff}
   res_basis::Vector{FunFldDiff}
+  cohomology_basis::Vector{Any}
   homology_basis::Vector{Vector{ZZRingElem}}
 
   R::Divisor
@@ -112,16 +113,18 @@ function mixed_hodge_structure(
   ]
 
   HS.E = E #what if points in E are at infinity ... :(
-  P_x = _change_ring(derivative(HS.defining_poly,1), HS.embedding_QBar)
   P_y = _change_ring(derivative(HS.defining_poly,2), HS.embedding_QBar)
+  P_x = _change_ring(derivative(HS.defining_poly,1), HS.embedding_QBar)
   singular_points_in_E = Vector{Vector{QQBarFieldElem}}()
   for (a,b) in E 
-    if all([iszero(P_x(a,b)), iszero(P_y(a,b))])
+    if all([iszero(P_y(a,b)), iszero(P_x(a,b))])
       push!(singular_points_in_E,[a,b])
     end
   end
-  HS.singular_points_in_E = singular_points_in_E
 
+  #singular points are really branch points
+  HS.singular_points_in_E = singular_points_in_E
+  
   HS.precision = prec 
 
   k = base_ring(HS.defining_poly)
@@ -198,7 +201,7 @@ end
 
 
 function Base.show(io::IO, HS::MixedHodgeStructure; C::String="C")
-  println(io, "Mixed Hodge Structure of the punctured marked curve with planar equation $C : $(HS.defining_poly)")
+  print(io, "Mixed Hodge Structure of the punctured marked curve with planar equation $C : $(HS.defining_poly)")
 end
 
 function fiber(HS::MixedHodgeStructure, z::AcbFieldElem)
@@ -207,9 +210,8 @@ function fiber(HS::MixedHodgeStructure, z::AcbFieldElem)
   #this is relevant for analytic_continuation
 
   fib = nothing
-
   try 
-    fib = roots(change_base_ring(AcbField(HS.precision),_change_ring(HS.defining_poly,HS.embedding_QBar))(z,t))
+    fib = roots(change_base_ring(AcbField(HS.precision),_change_ring(HS.defining_poly,HS.embedding_QBar))(z,t); initial_prec=HS.precision, max_prec=10000)
   catch 
     #in this case we must have that z is a branch point
     CC = AcbField(HS.precision)
@@ -494,8 +496,14 @@ function _residue_basis(HS::MixedHodgeStructure)
 end
 
 function cohomology(HS::MixedHodgeStructure)
+  if isdefined(HS, :cohomology_basis)
+    return HS.cohomology_basis
+  end
+
+
   if HS.E_empty
-    return [_zero_res_basis(HS); _residue_basis(HS)]
+    HS.cohomology_basis = [_zero_res_basis(HS); _residue_basis(HS)]
+    return HS.cohomology_basis
   end
 
   iota = HS.embedding_QBar
@@ -540,10 +548,12 @@ function cohomology(HS::MixedHodgeStructure)
   println(typeof([p for (p,_) in places_above_sing_pts]))
   HS.E_for_eval = [E_smooth; [p for (p,_) in places_above_sing_pts]]
 
-  return [
+  HS.cohomology_basis = [
     [[omega, zero_vec] for omega in forms];
     [[zero_form, v] for v in E_vecs]
   ]
+
+  return HS.cohomology_basis
 
 end
 
@@ -573,7 +583,11 @@ function reduction(HS::MixedHodgeStructure)
       (eta,vec) = eta
     end
 
-    eta_div = pole_divisor(eta.f) + pole_divisor(K_F)
+    if iszero(eta.f)
+      eta_div = trivial_divisor(parent(eta.f))
+    else
+      eta_div = pole_divisor(eta.f) + pole_divisor(K_F)
+    end
     
     L = riemann_roch_space(2 * (eta_div + R + D)) #figure out the exact divisor to put here
 
@@ -620,9 +634,8 @@ function reduction(HS::MixedHodgeStructure)
         num = sum([_change_ring(f,iota)(a) * b^(i - 1) for (i,f) in enumerate(Hecke.coefficients(numerator(f)))], init = zero(QQBar))
         push!(f_eval, num * den)
       else 
-        error("Don't know what to do yet")
-        #TODO: implement evaluation at a place for a function like this (should be really easy)
-        #this else is only triggered when there is a singular point on E
+        ev = _evaluate(p)
+        push!(f_eval, ev(f))
       end
     end
 
@@ -731,6 +744,7 @@ function _set_upstairs_graph(HS::MixedHodgeStructure)
     end 
     
     endpts = lift_data[2][end]
+    println(verts[edge[2]])
     endpts_ordered = fiber(HS, verts[edge[2]]) 
 
     new_edges = Vector{Tuple{Tuple{Int64,Int64},Tuple{Int64,Int64}}}()
@@ -952,14 +966,14 @@ function reduce_homology(HS::MixedHodgeStructure)
     println(length(v_basis))
     integrated_vector = [integrate_as_vectors(HS,w,v) for v in v_basis]
 
-    approx_coords = is_invertible_with_inverse(transpose(p_mat))[2] * integrated_vector
+    approx_coords = is_invertible_with_inverse(p_mat)[2] * integrated_vector
 
     a = ArbField(HS.precision)(1/2)
 
     #test if there are unique integers in the balls. 
     all(overlaps(a, radius(real(z))) && !is_nonzero(imag(z)) for z in approx_coords) && error("Precision not high enough")
 
-    return Vector{ZZRingElem}(round(Int, z) for z in approx_coords)
+    return [round(ZZRingElem, real(z)) for z in approx_coords]
 
   end
 
@@ -1180,7 +1194,7 @@ function period_matrix(HS::MixedHodgeStructure)
 
   v_basis = [QQBar.(i .== 1:length(cohom_basis)) for (i,_) in enumerate(cohom_basis)]
 
-  period_matrix = [[integrate_as_vectors(HS, gamma, v) for v in v_basis] for gamma in hom_basis]
+  period_matrix = [[integrate_as_vectors(HS, gamma, v) for gamma in hom_basis] for v in v_basis]
   HS.period_matrix = matrix(period_matrix)
   
   return matrix(period_matrix)

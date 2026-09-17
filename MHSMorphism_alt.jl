@@ -73,8 +73,10 @@ function pull_back(phi::FunctionFieldHomWithMHS)
   HS1 = phi.domain
   HS2 = phi.codomain
 
-  imE = Set(phi.phi_star(HS2.embedding_QBar.(P)) for P in HS2.E)
-  @assert issubset(imE, Set(HS1.embedding_QBar.(P) for P in HS1.E)) (
+  imE = Set(phi.phi_star([QQBar(a) for a in P]) for P in HS2.E)
+  println(imE)
+  println(HS1.E)
+  @assert issubset(imE, Set([QQBar(a) for a in P] for P in HS1.E)) (
     "Marked points of domain are not mapped into marekd points of codomain"
   )
   #TODO: check if preimage of D_1 is contained in D_2. This can be done using resultants
@@ -147,10 +149,8 @@ function cohomology(Phi::PullBackMHSMorphism)
     dummy_hs.D_div = trivial_divisor(F2)
   end
 
-  (i,j) = phi.codomain.R_data
-  dummy_hs.R = i * pole_divisor(x) + j * pole_divisor(y)
-
   dummy_hs.embedding_QBar = phi.embedding
+  dummy_hs.x = F2(gen(base_ring(F2)))
 
   red = reduction(dummy_hs)
 
@@ -168,14 +168,12 @@ function cohomology(Phi::PullBackMHSMorphism)
   mat = Vector{Vector{Union{NumFieldElem, QQBarFieldElem}}}()
 
   for f in cohom_basis
-    println(f)
     if phi.codomain.E_empty
       omega = phi(f) * dphi_x
     else
       f,vec = f
       omega = [phi(f) * dphi_x, [vec[perm[i]] for i in 1:length(phi.domain.E_for_eval)]]
     end
-    println(omega)
     push!(mat,red(omega))
   end
 
@@ -198,7 +196,6 @@ function homology(Phi::AbstractMixedHodgeStructureMorphism)
   CC = AcbField(prec)
 
   pull_back_candidate = is_invertible_with_inverse(p1)[2] * transpose(map_entries(z -> CC(z), cohom_mat)) * p2
-  println(pull_back_candidate)
 
   a = ArbField(prec)(1/2)
   Z = ArbField(prec)(0)
@@ -207,10 +204,11 @@ function homology(Phi::AbstractMixedHodgeStructureMorphism)
   
   for i in 1:nrows(pull_back_candidate)
     row = pull_back_candidate[i, 1:end]
-    all(!overlaps(radius(real(z)),a) && !is_nonzero(imag(z)) for z in row) || error("precision too low") 
-    start = time()
+    if !all(!overlaps(radius(real(z)),a) && !is_nonzero(imag(z)) for z in row) 
+      println(pull_back_candidate)
+      error("precision too low") 
+    end
     output[i, 1:end] = [round(ZZRingElem, real(z)) for z in row]
-    println(time() - start)
   end
 
   Phi.homology_matrix = output
@@ -227,7 +225,6 @@ function cohomology(Phi::TransferMHSMorphism)
     return transpose(matrix([[parent(a) == QQBar ? a : phi.embedding(a) for a in v] for v in Phi.cohomology_matrix]))
   end
 
-  start = time()
   phi = Phi.underlying_morphism
 
   #preperation on the codomain's end (mainly converting everything)
@@ -253,8 +250,8 @@ function cohomology(Phi::TransferMHSMorphism)
     E_image = Vector{Vector{QQBarFieldElem}}()
     for P in phi.domain.E_for_eval
       if typeof(P) <: Vector 
-        (a,b) = phi.phi_star(P)
-        I = ideal(O, O(phi(x1) - a), O(phi(y1) - b))
+        (a,b) = P
+        I = ideal(O, O(phi(x1 - a)), O(phi(y1 - b)))
       else
         I = sum(ideal(O,O(phi(phi.domain.function_field_Qbar(b)))) for b in basis(P))
       end
@@ -286,11 +283,11 @@ function cohomology(Phi::TransferMHSMorphism)
     dummy_hs.D_div = trivial_divisor(F1)
   end
 
-  (i,j) = Phi.codomain.R_data
-  dummy_hs.R = i * pole_divisor(x) + j * pole_divisor(y)
   dummy_hs.embedding_QBar = phi.embedding
+  dummy_hs.x = F1(gen(base_ring(F1)))
 
   red = reduction(dummy_hs)
+
   #prep on the domain's end
   F2 = phi.function_field2
   emb = phi.k2_to_K
@@ -312,7 +309,8 @@ function cohomology(Phi::TransferMHSMorphism)
       omega = t(f * dx2_over_dphix1) * dx1
     else
       f,vec = f
-      omega = [t(f * dx2_over_dphix1) * dx1, sum([a * ei for ei in e] for (a,e) in zip(vec,E_image))]
+      transferred_vec = [sum((row[j] * vec[j] for j in eachindex(vec));init = zero(QQBar)) for row in E_image]
+      omega = [t(f * dx2_over_dphix1) * dx1, transferred_vec]
     end
     push!(mat,red(omega))
   end

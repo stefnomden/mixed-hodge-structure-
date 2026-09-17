@@ -280,7 +280,7 @@ function trace_map(phi::FunctionFieldHomWithMHS)
   isnothing(x2_in_L) && error("degenerate error, unlikely to happen")
 
   y2_in_L = gen(L) - C * x2_in_L
-  F2_to_L = f -> sum(coeff(numerator(f),i)(x2_in_L) * y2_in_L^i for i in 0:degree(numerator(f))) // denominator(f)(x2_in_L)
+  F2_to_L = f -> sum([coeff(numerator(f),i)(x2_in_L) * y2_in_L^i for i in 0:degree(numerator(f))], init = zero(L)) // denominator(f)(x2_in_L)
   im_basis_in_L = [F2_to_L(imb) for imb in im_basis]
 
   x1 = phi.gens1[1]
@@ -306,7 +306,7 @@ function _find_E_permutation(phi::FunctionFieldHomWithMHS)
   F = HS1.function_field_Qbar
 
 
-  for P in [HS2.embedding_QBar.(P) for P in HS2.E]
+  for P in [[QQBar(a) for a in P] for P in HS2.E]
     imP = phi.phi_star(P)
     if P in HS2.singular_points_in_E && !(imP in HS1.singular_points_in_E)
       #if P is singular and it mapped to a nonsingular point, then all places above

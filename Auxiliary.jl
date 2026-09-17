@@ -42,6 +42,39 @@ function residue(omega::FunFldDiff, p::Hecke.GenOrdIdl, check_prime::Bool = true
 
 end
 
+function yield_matrix(functions::Vector{<:AbstractAlgebra.Generic.FunctionFieldElem})
+  #takes as input function field elements T, outputs a basis B and vector representations v for 
+  #every element in T in basis B. Mainly used for completing bases and computing ranks/inverses
+
+  if length(functions) == 0 
+    return [], []
+  end
+
+  F = parent(functions[1])
+  k = constant_field(F)
+  x,y = F(gen(base_ring(F))), gen(F)
+
+  Dx = lcm([lcm([denominator(a) for a in coordinates(f)]) for f in functions])
+  functions_cleared = [Dx * f for f in functions]
+  N = maximum(maximum(degree(numerator(a)) for a in coordinates(f)) for f in functions_cleared) + 1
+
+  vecs = Vector{Vector{elem_type(k)}}()
+
+  for f in functions_cleared
+    v = Vector{elem_type(k)}()
+    for a in coordinates(f)
+      coeff = [k(c) for c in Tuple(Hecke.coefficients(numerator(a)))]
+      append!(v, [coeff; fill(zero(k), N - length(coeff))])
+    end
+    push!(vecs, v)
+  end 
+
+  B = [x^i * y^j for j in (0,degree(F) - 1) for i in (0 : N - 1)]
+
+  return vecs, B
+
+
+end
 
 function _check_dim(
   forms::Vector{<:FunFldDiff},
@@ -258,6 +291,13 @@ function _evaluate(p::Hecke.GenOrdIdl)
     return ev_p
 end
 
+########################################################################################
+#                                                                                      #
+#                                                                                      #
+#             Code below is AI generated, works as intended for now                    #
+#                                                                                      #
+#                                                                                      #
+########################################################################################
 
 
 """

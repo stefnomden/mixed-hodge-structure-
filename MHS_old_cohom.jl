@@ -33,6 +33,8 @@ mutable struct MixedHodgeStructure
   cohomology_basis::Vector{Any}
   homology_basis::Vector{Vector{ZZRingElem}}
 
+  R::Divisor
+  R_data::Tuple{Int,Int}
   D_div::Divisor
   canon_div::Divisor
 
@@ -55,8 +57,6 @@ mutable struct MixedHodgeStructure
 
   master_matrix::Vector{Vector{Union{Nothing, AcbFieldElem}}}
   period_matrix::AcbMatrix 
-
-  minpoly_cache::Dict{FunFldDiff,AbstractAlgebra.Generic.Poly}
 
   function MixedHodgeStructure()
 
@@ -239,11 +239,11 @@ function fiber_exact(HS::MixedHodgeStructure, z::QQBarFieldElem)
   return sort(fib, lt = (alpha,beta) -> sheet_ordering(AcbField(HS.precision)(alpha), AcbField(HS.precision)(beta)))
 end
 
-function _zero_res_basis(HS::MixedHodgeStructure)
+function _zero_res_basis_dif(HS::MixedHodgeStructure)
 
-  if isdefined(HS, :zero_res_basis)
-    return HS.zero_res_basis
-  end
+  #if isdefined(HS, :zero_res_basis)
+  #  return HS.zero_res_basis
+  #end
 
   F  = HS.function_field_base
   x,y = F(gen(base_ring(F))), gen(F)
@@ -296,9 +296,182 @@ function _zero_res_basis(HS::MixedHodgeStructure)
     for f in [F1; F1_completion]
   ]
 
-  HS.zero_res_basis = output
+  return output
 
-  return HS.zero_res_basis
+end
+
+function _zero_res_basis(HS::MixedHodgeStructure, c::Int = 1)
+
+  if isdefined(HS, :zero_res_basis)
+    return HS.zero_res_basis
+  end
+
+
+  function ev_infty(f::AbstractAlgebra.Generic.RationalFunctionFieldElem)
+    if degree(denominator(f)) > degree(numerator(f))
+      return zero(k)
+    end
+    return k(Hecke.leading_coefficient(numerator(f)))
+  end
+
+  function prep_diff(omega::FunFldDiff, p::Hecke.GenOrdIdl)
+
+    start = time()
+    cords = coordinates(omega.f)
+    i = findfirst(c -> !iszero(c), cords) - 1
+    j = degree(numerator(cords[i+1]))
+    vf = j * xvals[p] + i * yvals[p] + dxvals[p]
+    #println(time() - start,"time to valuate: ")
+
+    t = unifs[p] 
+    dt = differential(t)
+
+    f = omega // dt
+
+    if vf > -1 
+      #println([k(0) for _ in ev_vecs[p]])
+      #println(ev_vecs[p])
+      return [k(0) for _ in ev_vecs[p][1]]
+    end
+    start = time()
+    vf = -vf 
+    g = t^(vf) * f
+    for n in (1:vf-1)
+      g = differential(g) // dt 
+      g = g // kC(n) 
+    end
+    #println(time() - start,"time it took to take ", vf-1, " derivatives: ")
+
+    start = time()
+    
+    den = nothing
+
+    try 
+      O(g)
+      den = one(kC)
+      #println(time() - start, ":time for checking if in order")
+    catch 
+      den = denominator(g * O) 
+    end
+
+    ev_den = Hecke.leading_coefficient(numerator(den)) 
+
+    #this is the vector to evaluate
+    start = time()
+    coords = coordinates(O(inv(ev_den)) * O(kC(den) * g))
+    #println("time to get coords: ", time() - start)
+    return [k(ev_infty(a)) for a in coords]
+
+  end
+
+  kC  = HS.function_field_base
+  O = infinite_maximal_order(kC)
+  x,y = kC(gen(base_ring(kC))), gen(kC)
+  k   = constant_field(kC)
+
+  places = [p[1] for p in factor(ideal(O, O(1//x)))]
+  unifs = Dict()
+  for p in places 
+    B = basis(p)
+    i = findfirst(b -> valuation(ideal(O,b), p) == 1, B)
+    isnothing(i) && error("No uniformizer found; this should not happen and is probably a bug")
+    unifs[p] = kC(B[i])
+  end
+
+  #println("unifs:")
+  for p in places 
+    #println(unifs[p])
+    #println(Hecke.divisor(unifs[p]))
+  end
+
+  if sum(degree(norm(p)) for p in places) == -1
+    inert_at_inf = true
+  else 
+    inert_at_inf = false 
+  end 
+
+  ev_vecs = Dict()
+
+  for p in places
+    M = basis_matrix(p)
+    M_ev = matrix(k, [ev_infty(base_field(kC)(M[i,j])) for i in 1:nrows(M), j in 1:ncols(M)])
+    ker = kernel(transpose(M_ev))
+    ev_vecs[p] = [collect(v) for v in eachrow(ker)]
+  end
+
+  genus = hs_genus(HS)
+  index = c * (ceil(Int, 4 * genus / degree(kC)) + 1)
+
+  functions = [y^i * x^j for j in (0:index) for i in (1:degree(kC) - 1)]
+
+  start = time()
+  dx = differential(kC(x))
+  if !inert_at_inf
+    dxvals = Dict(p => valuation(dx, p) for p in places)
+    xvals = Dict(p => valuation(x * O, p) for p in places)
+    yvals = Dict(p => valuation(y * O, p) for p in places)
+  end
+  #println(time() - start,"initial vals: ")
+
+  forms = [f * dx for f in functions]
+
+  R = index * pole_divisor(x) + (degree(kC) - 1) * pole_divisor(y)  
+  HS.R = R
+  HS.R_data = (index, degree(kC) - 1)
+
+  L_of_R = riemann_roch_space(R+pole_divisor(canonical_divisor(kC)))
+  #println(L_of_R)
+
+  residues = Vector{Vector{elem_type(k)}}()
+  form_basis = Vector{FunFldDiff{<:AbstractAlgebra.Generic.FunctionFieldElem}}()
+
+  A = zero_matrix(k, 0, 0)
+  ker_size = 0
+
+  for omega in forms
+
+    res_vec = Vector{elem_type(k)}()
+    for p in places
+      append!(
+        res_vec, 
+        [if inert_at_inf zero(k) else dot(prep_diff(omega,p),v) end for v in ev_vecs[p]]
+      )
+    end
+    
+    push!(residues, res_vec)
+    A = matrix(residues)
+    #println(A)
+
+    ker = kernel(A)
+
+    if number_of_rows(ker) >= 2 * genus && number_of_rows(ker) > ker_size
+      start = time()
+      ker_size = number_of_rows(ker)
+      zero_residue_forms = [
+        sum(kC(a) * omega for (a,omega) in zip(v,forms)) for v in eachrow(kernel(A))
+        ]
+      form_basis = Vector{FunFldDiff{<:AbstractAlgebra.Generic.FunctionFieldElem}}()
+
+      for zero_form in zero_residue_forms
+        potential = [form_basis; [zero_form]]
+        if _check_dim(potential, L_of_R) > length(form_basis)
+          push!(form_basis, zero_form)
+        end
+      end
+      #println(time() - start, "time spent in linalg zone: ")
+    end
+
+    if length(form_basis) == 2 * genus
+      dx = differential(HS.x)
+      constant_field_change = [
+        map_function_field_coeffs(omega.f, HS.k_to_kD, HS.function_field) * dx for omega in form_basis
+      ]
+      HS.zero_res_basis = constant_field_change
+      return HS.zero_res_basis
+    end
+  end
+
+  return _zero_res_basis(HS, c + 1)
 
 end
 
@@ -313,14 +486,20 @@ function _residue_basis(HS::MixedHodgeStructure)
     return Vector{FunFldDiff{<:AbstractAlgebra.Generic.FunctionFieldElem}}()
   end 
 
-  F = HS.function_field
-  x,y = HS.x,HS.y
+  if HS.D_defined_over_k
+    F = HS.function_field
+    x,y = HS.x,HS.y
+  else 
+    F = HS.function_field_Qbar
+    x,y = HS.x2,HS.y2
+  end
   K_F = canonical_divisor(F)
   HS.canon_div = K_F
   O = finite_maximal_order(F)
   Oinf = infinite_maximal_order(F)
   dx = differential(x)
 
+  println([(a,b) for (a,b) in HS.D])
   D_ideals = [ideal(O, O(x - a), O(y - b)) for (a,b) in HS.D]
   t = nothing
   try 
@@ -331,6 +510,7 @@ function _residue_basis(HS::MixedHodgeStructure)
   end
   #if y//x is not in Oinf, then i am not certain whether basis(Oinf)[2] will always be an element which
   #'acts the same' as y//x. i.e. t - d//c vanishes at (c : d : 0)
+  println(t)
   D_ideals_inf = [
     iszero(c) ? ideal(Oinf, Oinf(x//y)) :
     ideal(Oinf, Oinf(1//x), t - Oinf(d//c))
@@ -341,27 +521,48 @@ function _residue_basis(HS::MixedHodgeStructure)
   HS.D_div = D_div
 
   zero_res = copy(_zero_res_basis(HS))
-  form_basis = zero_res
-  
-  forms_to_check = riemann_roch_space(D_div + K_F)
-  zero_res_forms = [omega.f for omega in _zero_res_basis(HS)[1:hs_genus(HS)]]
+  #this converts the zero residue basis to the same basis but with constant field QQBar
+  if HS.D_defined_over_k
+    form_basis = zero_res
+  else
+    form_basis = [
+        sum(
+            sum(
+                QQBar(c) * (x)^(j - 1)
+                for (j, c) in enumerate(Hecke.coefficients(numerator(a)));
+                init = zero(F)
+            ) * (y)^(i - 1)
+            for (i, a) in enumerate(coordinates(omega.f));
+            init = zero(F)
+        ) * dx
+        for omega in zero_res
+    ]
+  end
+  j = maximum([maximum([degree(numerator(a)) for a in Hecke.coefficients(omega.f)]) for omega in zero_res])
+  i = degree(HS.function_field) - 1
+  R = 3 * (i * pole_divisor(x) + j * pole_divisor(y))
+  HS.R = R
 
-  vecs, _ = yield_matrix([zero_res_forms; forms_to_check])
-  A = vecs[1:hs_genus(HS)]
+
+  L = riemann_roch_space(R + D_div + K_F)
+  forms_to_check = [f * dx for f in riemann_roch_space(D_div + K_F)]
+  println(forms_to_check)
 
   res_forms = Vector{FunFldDiff{<:AbstractAlgebra.Generic.FunctionFieldElem}}()
-  rA = rank(matrix(A))
-  for (v,f) in zip(vecs[hs_genus(HS)+1:end], forms_to_check)
-    if rank(matrix([A; [v]])) > rA
-      push!(A,v)
-      push!(res_forms, f * dx)
-      rA += 1
+
+  for omega in forms_to_check
+    potential = [form_basis; [omega]]
+    if _check_dim(potential, L) > length(form_basis)
+      push!(form_basis, omega)
+      println("omega: ", omega)
+      println("forms: ", _zero_res_basis(HS))
+      push!(res_forms, omega)
     end
   end
 
   HS.res_basis = res_forms
-
   return res_forms
+  
 
 end
 
@@ -381,10 +582,9 @@ function cohomology(HS::MixedHodgeStructure)
 
   places_above_sing_pts = Dict()
   map = nothing
-  if HS.E_defined_over_k
+  if hs.E_defined_over_k
     map = HS.embedding_QBar
   else
-    println("hi")
     map = z -> z
   end
   E_pts_places_corr = Dict((map(a),map(b)) => Vector{Hecke.GenOrdIdl}() for (a,b) in HS.E)
@@ -436,9 +636,9 @@ function cohomology(HS::MixedHodgeStructure)
 
 end
 
-function reduction(HS::MixedHodgeStructure)
+function reduction_dif(HS::MixedHodgeStructure)
 
-  H_basis = [_zero_res_basis(HS); _residue_basis(HS)]
+  H_basis = [_zero_res_basis_dif(HS); _residue_basis(HS)]
 
   if !isdefined(HS, :canon_div)
     F = HS.function_field
@@ -447,7 +647,7 @@ function reduction(HS::MixedHodgeStructure)
   end
   K_F = HS.canon_div
   D = HS.D_div
-  R = (Int(ceil((2 * hs_genus(HS))//degree(HS.function_field))) + 1) * pole_divisor(HS.x)
+  R = (Int(ceil((2 * hs_genus(HS))//degree(HS.function_field)))) * pole_divisor(HS.x)
 
   function reduction_wrt_basis(eta::Union{FunFldDiff, Vector{Any}}; return_f = false)
     if !HS.E_empty
@@ -469,6 +669,11 @@ function reduction(HS::MixedHodgeStructure)
     ])
 
     ker = eachrow(kernel(matrix(vecs)))
+
+    for v in ker
+      println(v)
+    end
+
 
     i = findfirst(v -> v[end] != 0, ker)
     @assert !isnothing(i) "Error: this error should not trigger; there is a bug"
@@ -507,11 +712,101 @@ function reduction(HS::MixedHodgeStructure)
 
     return [cord; v]
   end
+end
+
+
+
+function reduction(HS::MixedHodgeStructure)
+
+  H_basis = [_zero_res_basis(HS); _residue_basis(HS)]
+
+  if !isdefined(HS, :canon_div)
+    F = HS.function_field
+    HS.canon_div = canonical_divisor(F)
+    HS.D_div = trivial_divisor(F)
+  end
+  K_F = HS.canon_div
+  D = HS.D_div
+  R = HS.R
+
+
+  function reduction_wrt_basis(eta::Union{FunFldDiff, Vector{Any}}; return_f = false)
+    if HS.D_defined_over_k
+      k = constant_field(parent(H_basis[1].f))
+    else 
+      k = QQBar
+    end
+
+    if !HS.E_empty
+      (eta,vec) = eta
+    end
+
+    if iszero(eta.f)
+      eta_div = trivial_divisor(parent(eta.f))
+    else
+      eta_div = pole_divisor(eta.f) + pole_divisor(K_F)
+    end
+    
+    L = riemann_roch_space(2 * (eta_div + R + D)) #figure out the exact divisor to put here
+
+    big_space = [[differential(f).f for f in L]; [omega.f for omega in H_basis]; [eta.f]]
+    Dx = lcm([lcm([denominator(a) for a in coordinates(f)]) for f in big_space])
+    big_space_cleared = [Dx * f for f in big_space]
+    N = maximum(maximum(degree(numerator(a)) for a in coordinates(f)) for f in big_space_cleared) + 1
+
+    to_be_matrix = Vector{Vector{elem_type(k)}}()
+
+    for f in big_space_cleared
+      row = Vector{elem_type(k)}()
+      for a in coordinates(f)
+        coeff = [k(c) for c in Tuple(Hecke.coefficients(numerator(a)))]
+        append!(row, [coeff; fill(zero(k), N - length(coeff))])
+      end
+      push!(to_be_matrix, row)
+    end
+
+    A = matrix(to_be_matrix)
+
+    ker = eachrow(kernel(A))
+    i = findfirst(v -> v[end] != 0, ker)
+    v = ker[i]
+
+    f = inv(-v[end]) * sum(a * g for (a,g) in zip(v[1:length(L)], L))
+    cord = [inv(-v[end]) * c for c in v[length(L) + 1:end - 1]]
+
+    if HS.E_empty
+      if return_f
+        return cord,f
+      else 
+        return cord
+      end
+    end
+
+    f_eval = Vector{QQBarFieldElem}()
+    iota = HS.embedding_QBar
+
+    for p in HS.E_for_eval
+      if typeof(p) <: Vector 
+        (a,b) = p
+        den = inv(_change_ring(denominator(f),iota)(a))
+        num = sum([_change_ring(f,iota)(a) * b^(i - 1) for (i,f) in enumerate(Hecke.coefficients(numerator(f)))], init = zero(QQBar))
+        push!(f_eval, num * den)
+      else 
+        ev = _evaluate(p)
+        push!(f_eval, ev(f))
+      end
+    end
+
+    v = [a - b for (a,b) in zip(vec, f_eval)]
+    v = [i - v[end] for i in v[1:end-1]]
+
+    return [cord; v]
+
+  end
 
   return reduction_wrt_basis
 
 end
-
 
 function _set_plane_graph(HS::MixedHodgeStructure)
 
@@ -559,10 +854,7 @@ function _set_plane_graph(HS::MixedHodgeStructure)
     e = CC(HS.E_defined_over_k ? iota(e[1]) : e[1])
     index_of_e = findfirst(j -> overlaps(vertices[j],e), eachindex(vertices))
     close_to_e = argmin(j -> abs(vertices[j] - e), [k for k in eachindex(vertices) if k != index_of_e])
-    potential_new_edge = (close_to_e,findfirst(j -> overlaps(vertices[j],e), eachindex(vertices)))
-    if !(potential_new_edge in plane_edges)
-      push!(plane_edges, potential_new_edge)
-    end
+    push!(plane_edges, (close_to_e,findfirst(j -> overlaps(vertices[j],e), eachindex(vertices))))
   end 
 
   c = sum(boundary)/length(boundary)
@@ -861,8 +1153,6 @@ function integrate(HS::MixedHodgeStructure, omega::Union{FunFldDiff, Vector{Any}
     end
   end
 
-
-
   if !HS.E_empty
     (omega,vec) = omega 
   end
@@ -871,7 +1161,7 @@ function integrate(HS::MixedHodgeStructure, omega::Union{FunFldDiff, Vector{Any}
   CC = AcbField(HS.precision)
   RR = ArbField(HS.precision)
   Etol = RR(2)^(-(HS.precision + 10))
-
+  println(Etol)
 
   #if there is a singular point in E, then there is a correspondence between 
   #the paths going in/out of the singular point and the places extending the singular point.
@@ -885,24 +1175,13 @@ function integrate(HS::MixedHodgeStructure, omega::Union{FunFldDiff, Vector{Any}
       findfirst(((i,j),) -> overlaps(HS.plane_verts[i], CC(QQBar(a))) && overlaps(fiber(HS,HS.plane_verts[i])[j], CC(QQBar(b))),
       HS.upstairs_vertices) for (a,b) in HS.E_for_eval
     ]
-    println(indices)
     HS.E_abstract_vertices = [HS.upstairs_vertices[j] for j in indices]
   end
 
   _,CCx = polynomial_ring(CC, :z)
   ini, ter = HS.plane_verts[edge[1][1]], HS.plane_verts[edge[2][1]]
 
-  if !isdefined(HS, :minpoly_cache)
-    HS.minpoly_cache = Dict{FunFldDiff,AbstractAlgebra.Generic.Poly}()
-  end
-
-  g = nothing 
-  if haskey(HS.minpoly_cache,omega)
-    g = HS.minpoly_cache[omega]
-  else 
-    g = minpoly(omega.f)
-    HS.minpoly_cache[omega] = g
-  end
+  g = minpoly(omega.f)
   g = lcm([denominator(a) for a in Hecke.coefficients(g)]) * g
   a0 = numerator(Hecke.leading_coefficient(g))
   sq_free = divexact(a0, gcd(a0, derivative(a0)))
@@ -1015,16 +1294,15 @@ function integrate(HS::MixedHodgeStructure, omega::Union{FunFldDiff, Vector{Any}
     findfirst(((v1,v2),) -> (v1 == (edge[1][1], i)) && (v2[1] == edge[2][1]), HS.upstairs_edges)
     for (i,_) in enumerate(final_vals)
   ]
-
+  
+  edges = [HS.upstairs_edges[e] for e in edge_indices] 
+  sign = Dict(edge[1] => CC(-1), edge[2] => CC(1))
   if !HS.E_empty
-    UE = HS.upstairs_edges
-    corr = Dict(e => CC(vec[j]) for (j,e) in enumerate(HS.E_abstract_vertices))
-    for (k,j) in enumerate(edge_indices)
-      final_vals[k] += get(corr,UE[j][2],CC(0)) - get(corr,UE[j][1],CC(0))
+    for (k,_) in enumerate(final_vals)
+      final_vals[k] += sum(CC(vec[j]) * get(sign,v,CC(0)) for (j,v) in enumerate(HS.E_abstract_vertices))
     end
   end
 
-  #Cache
   if isdefined(HS, :master_matrix)
     i = findfirst(==(HS.E_empty ? omega : [omega,vec]), cohomology(HS))
     if !isnothing(i)
@@ -1034,16 +1312,12 @@ function integrate(HS::MixedHodgeStructure, omega::Union{FunFldDiff, Vector{Any}
     end
   end
 
-  output = final_vals[edge[1][2]]
-  if !HS.E_empty
-    sign = Dict(edge[1] => CC(-1), edge[2] => CC(1))
-    output += sum(CC(vec[j]) * get(sign,v,CC(0)) for (j,v) in enumerate(HS.E_abstract_vertices))
-  end
   return final_vals[edge[1][2]]
   
 end
 
 function integrate_as_vectors(HS::MixedHodgeStructure, gamma::Vector{ZZRingElem}, v::Vector{QQBarFieldElem})
+  
   _set_master_matrix(HS)
   cohom_basis = cohomology(HS)
 
@@ -1057,12 +1331,6 @@ function integrate_as_vectors(HS::MixedHodgeStructure, gamma::Vector{ZZRingElem}
   output = CC(0)
 
   for (i,j) in Iterators.product(form_indices, edge_indices)
-    I = integrate(HS, cohom_basis[i], HS.upstairs_edges[j])
-    println()
-    println("I: ", I)
-    println("coeff: ", CC(v[i]) * CC(gamma[j]))
-    println("(i,j): ", (i,j))
-    println()
     output += CC(v[i]) * CC(gamma[j]) * integrate(HS, cohom_basis[i], HS.upstairs_edges[j])
   end
 
@@ -1102,6 +1370,7 @@ function holom_period_matrix(HS::MixedHodgeStructure)
 
 end
 
+
 function _set_master_matrix(HS::MixedHodgeStructure)
 
   if isdefined(HS, :master_matrix)
@@ -1113,6 +1382,7 @@ function _set_master_matrix(HS::MixedHodgeStructure)
 
   HS.master_matrix = [[nothing for _ in HS.upstairs_edges] for _ in cohom_basis]
 end
+
 
 function _show_plane_graph(HS::MixedHodgeStructure)
 
@@ -1137,12 +1407,6 @@ function _show_plane_graph(HS::MixedHodgeStructure)
   display(current())
 end
 
-function generators_of_homology(HS::MixedHodgeStructure)
-    H = homology_basis(HS)
-    edges = HS.upstairs_edges
-
-    return [[v[i] > 0 ? e : (e[2],e[1]) for (i,e) in enumerate(edges) if v[i] != 0] for v in H]
-end
 
 function _abstract_graph_of_triangulation(HS::MixedHodgeStructure)
   if !isdefined(HS, :upstairs_edges)
